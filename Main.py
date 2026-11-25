@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -7,13 +8,14 @@ from rdkit import Chem
 from rdkit.Chem import AllChem, Draw
 
 # =====================================================================
-# Aplikacja Streamlit: baza pochodnych emitera TADF (DMAC-TRZ i podobne)
-# Plik bazy (Baza_Streamlit.csv) musi leżeć w tym samym folderze co Main.py.
+# Aplikacja Streamlit: baza pochodnych emitera TADF (wybrane związki po
+# usunięciu zbyt podobnych) + rozkłady deskryptorów.
+# Plik bazy (Baza_Streamlit_Ready.csv) musi leżeć w tym samym folderze co Main.py.
 # =====================================================================
 
 st.set_page_config(page_title="Baza emiterów TADF", layout="wide")
 
-PLIK_BAZY = Path(__file__).parent / "Baza_Streamlit.csv"
+PLIK_BAZY = Path(__file__).parent / "Baza_Streamlit_Ready.csv"
 
 PODSTAWNIKI = {"1": "-CH3", "2": "-F", "3": "-Cl", "4": "-Br", "5": "-I"}
 OPIS_LM = {
@@ -24,6 +26,17 @@ OPIS_LM = {
 }
 OPIS_AM = {"AM1": "pozycje orto", "AM2": "pozycje meta", "AM3": "pozycje para"}
 OPIS_DONOR = {"D1": "DMAC", "D2": "CBZ (karbazol)", "D3": "TPA"}
+
+OPIS_DESKRYPTOROW = {
+    "Hal": "liczba atomów halogenów",
+    "MolWt": "masa molowa [g/mol]",
+    "HAC": "liczba atomów ciężkich",
+    "HA_MolWt": "masa atomów ciężkich [g/mol]",
+    "ASA": "powierzchnia cząsteczki (Labute ASA)",
+    "Val": "indeks connectivity Chi1v",
+    "ASF": "asferyczność (z geometrii 3D)",
+}
+GRUPY = ["Donor", "Mod_Donor", "Sub_Donor", "Mod_Linker", "Sub_Linker", "Mod_Akceptor", "Sub_Akceptor"]
 
 
 def opis_podstawnika(kod):
@@ -67,14 +80,14 @@ def widok_3d(xyz, wysokosc=450):
 
 
 df = wczytaj_dane()
+DESKRYPTORY = [d for d in OPIS_DESKRYPTOROW if d in df.columns]
 
 st.title("Baza pochodnych emitera TADF")
 st.caption(
     "Układy donor – linker – akceptor (DMAC/CBZ/TPA – fenylen – difenylotriazyna) "
-    "z modyfikacjami podstawnikowymi. Geometria 3D to wstępny wynik MMFF (nie DFT)."
+    "z modyfikacjami podstawnikowymi. Pokazane są związki wybrane po usunięciu zbyt podobnych "
+    "(odcisk Morgana, podobieństwo Tanimoto). Geometria 3D to wstępny wynik MMFF (nie DFT)."
 )
-
-tab_baza, tab_info = st.tabs(["Baza cząsteczek", "O projekcie"])
 
 # ----------------------------- FILTRY ---------------------------------
 st.sidebar.header("Filtry")
@@ -107,23 +120,25 @@ for kolumna, wartosci in wybrane_filtry.items():
 
 przefiltrowane = df[maska].reset_index(drop=True)
 
+tab_baza, tab_desc, tab_info = st.tabs(["Baza cząsteczek", "Rozkład deskryptorów", "O projekcie"])
+
+if przefiltrowane.empty:
+    st.warning("Żadna cząsteczka nie spełnia wybranych filtrów.")
+    st.stop()
+
 # ----------------------------- ZAKŁADKA BAZA --------------------------
 with tab_baza:
     st.subheader(f"Cząsteczki: {len(przefiltrowane)} z {len(df)}")
 
-    if przefiltrowane.empty:
-        st.warning("Żadna cząsteczka nie spełnia wybranych filtrów.")
-        st.stop()
-
     kolumny_tabeli = [
-        c for c in [
-            "Full_name", "Donor", "Mod_Donor", "Sub_Donor", "Mod_Linker", "Sub_Linker",
-            "Mod_Akceptor", "Sub_Akceptor", "Wzor", "Masa_Molowa", "Liczba_Atomow_z_H",
-        ] if c in przefiltrowane.columns
+        c for c in (
+            ["Full_name", "Donor", "Mod_Donor", "Sub_Donor", "Mod_Linker", "Sub_Linker",
+             "Mod_Akceptor", "Sub_Akceptor", "Wzor"] + DESKRYPTORY
+        ) if c in przefiltrowane.columns
     ]
     widok = przefiltrowane[kolumny_tabeli]
 
-    st.write("Kliknij wiersz w tabeli, aby zobaczyć strukturę (domyślnie pierwszy wiersz).")
+    st.write("Zaznacz kwadracik przy wierszu, aby zobaczyć strukturę (domyślnie pierwszy wiersz).")
     wybrane_wiersze = []
     try:
         zdarzenie = st.dataframe(
@@ -172,6 +187,90 @@ with tab_baza:
                     mime="chemical/x-xyz",
                 )
 
+# ----------------------------- ZAKŁADKA DESKRYPTORY -------------------
+with tab_desc:
+    st.subheader("Rozkład deskryptorów")
+    st.caption(
+        f"Dane: {len(przefiltrowane)} cząsteczek po zastosowaniu filtrów z lewego panelu "
+        "(żeby zobaczyć cały zbiór, zaznacz wszystkie opcje w filtrach)."
+    )
+
+    if not DESKRYPTORY:
+        st.info("W pliku bazy nie ma kolumn z deskryptorami.")
+    else:
+        def opis_deskryptora(d):
+            return f"{d} – {OPIS_DESKRYPTOROW[d]}"
+
+        # --- histogram ---
+        st.markdown("#### Histogram")
+        k1, k2, k3 = st.columns(3)
+        deskryptor = k1.selectbox("Deskryptor", DESKRYPTORY, format_func=opis_deskryptora)
+        grupa = k2.selectbox("Koloruj według", ["brak"] + GRUPY)
+        liczba_binow = k3.slider("Liczba przedziałów", 5, 100, 30)
+
+        kolor = alt.Color(f"{grupa}:N") if grupa != "brak" else alt.value("#4c78a8")
+        histogram = (
+            alt.Chart(przefiltrowane)
+            .mark_bar()
+            .encode(
+                x=alt.X(f"{deskryptor}:Q", bin=alt.Bin(maxbins=liczba_binow), title=opis_deskryptora(deskryptor)),
+                y=alt.Y("count()", title="Liczba związków"),
+                color=kolor,
+            )
+            .properties(height=350)
+        )
+        st.altair_chart(histogram)
+
+        st.markdown("#### Statystyki opisowe")
+        st.dataframe(przefiltrowane[DESKRYPTORY].describe().T.round(3))
+
+        # --- wykres rozrzutu ---
+        st.markdown("#### Zależność dwóch deskryptorów")
+        s1, s2, s3 = st.columns(3)
+        os_x = s1.selectbox("Oś X", DESKRYPTORY, index=0, format_func=opis_deskryptora, key="os_x")
+        os_y = s2.selectbox(
+            "Oś Y", DESKRYPTORY, index=min(1, len(DESKRYPTORY) - 1), format_func=opis_deskryptora, key="os_y"
+        )
+        grupa2 = s3.selectbox("Koloruj według", ["brak"] + GRUPY, key="grupa2")
+
+        kolor2 = alt.Color(f"{grupa2}:N") if grupa2 != "brak" else alt.value("#4c78a8")
+        rozrzut = (
+            alt.Chart(przefiltrowane)
+            .mark_circle(size=40, opacity=0.6)
+            .encode(
+                x=alt.X(f"{os_x}:Q", scale=alt.Scale(zero=False)),
+                y=alt.Y(f"{os_y}:Q", scale=alt.Scale(zero=False)),
+                color=kolor2,
+                tooltip=["Full_name", os_x, os_y],
+            )
+            .properties(height=400)
+            .interactive()
+        )
+        st.altair_chart(rozrzut)
+
+        # --- korelacje ---
+        st.markdown("#### Korelacje (Pearson)")
+        if len(przefiltrowane) > 2 and len(DESKRYPTORY) > 1:
+            korelacje = przefiltrowane[DESKRYPTORY].corr().stack().reset_index()
+            korelacje.columns = ["x", "y", "r"]
+            mapa = (
+                alt.Chart(korelacje)
+                .mark_rect()
+                .encode(
+                    x=alt.X("x:N", title=None),
+                    y=alt.Y("y:N", title=None),
+                    color=alt.Color("r:Q", scale=alt.Scale(domain=[-1, 1], scheme="redblue")),
+                )
+            )
+            tekst = (
+                alt.Chart(korelacje)
+                .mark_text()
+                .encode(x="x:N", y="y:N", text=alt.Text("r:Q", format=".2f"))
+            )
+            st.altair_chart((mapa + tekst).properties(height=350))
+        else:
+            st.info("Za mało cząsteczek, żeby policzyć korelacje.")
+
 # ----------------------------- ZAKŁADKA INFO --------------------------
 with tab_info:
     st.markdown(
@@ -189,7 +288,14 @@ typ akceptora (A1), modyfikacja akceptora (AM1–3), podstawnik akceptora (AR1�
 
 Podstawniki: 1 = -CH3, 2 = -F, 3 = -Cl, 4 = -Br, 5 = -I.
 
-Liczba układów: 3 × 3 × 5 donorów, 1 × 3 × 5 akceptorów i 4 × 5 linkerów, czyli 13 500 cząsteczek.
+### Skąd ten zbiór
+Pełna biblioteka to 13 500 cząsteczek (3 × 3 × 5 donorów, 1 × 3 × 5 akceptorów, 4 × 5 linkerów).
+Z niej wylosowano 2000 związków, a następnie usunięto te, których odcisk (Morgan, promień 2, 1024 bity)
+był zbyt podobny do już zachowanych (podobieństwo Tanimoto powyżej progu).
+
+### Deskryptory
+Hal – liczba halogenów, MolWt – masa molowa, HAC – liczba atomów ciężkich, HA_MolWt – masa atomów ciężkich,
+ASA – powierzchnia Labute, Val – indeks Chi1v, ASF – asferyczność (z geometrii 3D z MMFF).
 
 ### Wyniki obliczeń DFT
 Miejsce na wyniki (ΔE_ST, SOC) po zakończeniu obliczeń w ORCA.
